@@ -1,53 +1,73 @@
 # app.py
 import streamlit as st
 import pandas as pd
-import sqlite3
-from datetime import date
+import gspread
+from google.oauth2.service_account import Credentials
+from datetime import date, datetime
 import plotly.express as px
 
-DB = "gastos.db"
+# ---------- Conexión a Google Sheets ----------
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
 
-# ---------- DB ----------
-def get_conn():
-    conn = sqlite3.connect(DB)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS gastos (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            fecha DATE NOT NULL,
-            descripcion TEXT,
-            monto REAL NOT NULL,
-            categoria TEXT,
-            medio_pago TEXT,
-            tarjeta TEXT,
-            cuotas INTEGER DEFAULT 1,
-            moneda TEXT DEFAULT 'ARS',
-            origen TEXT,
-            notas TEXT,
-            creado_en TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
-    return conn
+@st.cache_resource
+def get_worksheet():
+    creds = Credentials.from_service_account_info(
+        st.secrets["gcp_service_account"], scopes=SCOPES
+    )
+    client = gspread.authorize(creds)
+    sh = client.open_by_key(st.secrets["app"]["sheet_id"])
+    return sh.sheet1
 
-def insertar(row: dict):
-    conn = get_conn()
-    conn.execute("""INSERT INTO gastos (fecha, descripcion, monto, categoria,
-                    medio_pago, tarjeta, cuotas, moneda, origen, notas)
-                    VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                 (row["fecha"], row["descripcion"], row["monto"], row["categoria"],
-                  row["medio_pago"], row.get("tarjeta"), row.get("cuotas", 1),
-                  row.get("moneda", "ARS"), row["origen"], row.get("notas")))
-    conn.commit(); conn.close()
-
-def eliminar(gasto_id: int):
-    conn = get_conn()
-    conn.execute("DELETE FROM gastos WHERE id = ?", (gasto_id,))
-    conn.commit(); conn.close()
+COLUMNS = ["id", "fecha", "descripcion", "monto", "categoria", "medio_pago",
+           "tarjeta", "cuotas", "moneda", "origen", "notas", "creado_en"]
 
 def leer_df() -> pd.DataFrame:
-    conn = get_conn()
-    df = pd.read_sql("SELECT * FROM gastos", conn, parse_dates=["fecha"])
-    conn.close()
+    ws = get_worksheet()
+    data = ws.get_all_records()
+    df = pd.DataFrame(data)
+    if df.empty:
+        return pd.DataFrame(columns=COLUMNS)
+    df["fecha"] = pd.to_datetime(df["fecha"], errors="coerce")
+    df["monto"] = pd.to_numeric(df["monto"], errors="coerce").fillna(0)
+    df["cuotas"] = pd.to_numeric(df["cuotas"], errors="coerce").fillna(1).astype(int)
+    df["id"] = pd.to_numeric(df["id"], errors="coerce").fillna(0).astype(int)
     return df
+
+def proximo_id() -> int:
+    df = leer_df()
+    return 1 if df.empty else int(df["id"].max()) + 1
+
+def insertar(row: dict):
+    ws = get_worksheet()
+    nueva = [
+        proximo_id(),
+        row["fecha"].strftime("%Y-%m-%d"),
+        row["descripcion"],
+        float(row["monto"]),
+        row["categoria"],
+        row["medio_pago"],
+        row.get("tarjeta", ""),
+        int(row.get("cuotas", 1)),
+        row.get("moneda", "ARS"),
+        row.get("origen", "manual"),
+        row.get("notas", ""),
+        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    ]
+    ws.append_row(nueva, value_input_option="USER_ENTERED")
+    st.cache_data.clear()
+
+def eliminar(gasto_id: int):
+    ws = get_worksheet()
+    data = ws.get_all_records()
+    for idx, fila in enumerate(data, start=2):  # +2: fila 1 son headers
+        if int(fila.get("id", 0)) == gasto_id:
+            ws.delete_rows(idx)
+            st.cache_data.clear()
+            return True
+    return False
 
 # ---------- Constantes ----------
 CATEGORIAS = ["Supermercado", "Transporte", "Ocio", "Salud", "Servicios",
@@ -87,11 +107,14 @@ with tab_registro:
             elif not descripcion.strip():
                 st.error("Ingresá una descripción")
             else:
-                insertar({"fecha": fecha, "descripcion": descripcion, "monto": monto,
-                          "categoria": categoria, "medio_pago": medio_pago,
-                          "tarjeta": tarjeta, "cuotas": cuotas, "moneda": moneda,
-                          "origen": "manual", "notas": notas})
-                st.success("Gasto guardado ✅")
+                try:
+                    insertar({"fecha": fecha, "descripcion": descripcion, "monto": monto,
+                              "categoria": categoria, "medio_pago": medio_pago,
+                              "tarjeta": tarjeta, "cuotas": cuotas, "moneda": moneda,
+                              "origen": "manual", "notas": notas})
+                    st.success("Gasto guardado ✅")
+                except Exception as e:
+                    st.error(f"Error al guardar: {e}")
 
 # --- Dashboard ---
 with tab_dashboard:
@@ -101,7 +124,6 @@ with tab_dashboard:
     else:
         df["mes"] = df["fecha"].dt.to_period("M").astype(str)
 
-        # Filtros
         with st.sidebar:
             st.header("🔎 Filtros")
             meses = st.multiselect("Mes", sorted(df["mes"].unique(), reverse=True))
@@ -121,14 +143,12 @@ with tab_dashboard:
         if f.empty:
             st.warning("No hay gastos que coincidan con los filtros.")
         else:
-            # KPIs
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("Total gastado", f"$ {f['monto'].sum():,.0f}")
             k2.metric("Transacciones", len(f))
             k3.metric("Ticket promedio", f"$ {f['monto'].mean():,.0f}")
             k4.metric("Meses cubiertos", f["mes"].nunique())
 
-            # Gráficos
             c1, c2 = st.columns(2)
             with c1:
                 st.subheader("Evolución mensual")
@@ -146,17 +166,23 @@ with tab_dashboard:
 
 # --- Datos crudos ---
 with tab_datos:
+    if st.button("🔄 Refrescar"):
+        st.cache_data.clear()
+        st.rerun()
+
     df = leer_df()
     if df.empty:
         st.info("No hay gastos cargados aún.")
     else:
         st.dataframe(df.sort_values("fecha", ascending=False), use_container_width=True)
-
         st.download_button("⬇️ Descargar CSV", df.to_csv(index=False).encode(),
                            "gastos.csv", "text/csv")
 
         with st.expander("🗑️ Eliminar un gasto"):
             id_a_borrar = st.number_input("ID del gasto a eliminar", min_value=1, step=1)
             if st.button("Eliminar", type="secondary"):
-                eliminar(int(id_a_borrar))
-                st.success(f"Gasto ID {id_a_borrar} eliminado. Refrescá la pestaña.")
+                if eliminar(int(id_a_borrar)):
+                    st.success(f"Gasto ID {id_a_borrar} eliminado.")
+                    st.rerun()
+                else:
+                    st.error(f"No se encontró un gasto con ID {id_a_borrar}.")
