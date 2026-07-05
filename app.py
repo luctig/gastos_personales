@@ -71,7 +71,7 @@ def eliminar(gasto_id: int):
 
 # ---------- Constantes ----------
 CATEGORIAS = ["Supermercado", "Transporte", "Ocio", "Salud", "Servicios",
-              "Restaurantes", "Educación", "Hogar", "Vestimenta", "Otros"]
+              "Restaurantes", "Educación", "Hogar", "Vestimenta", "Otros", "Préstamos", "Impuestos"]
 
 MEDIOS_PAGO = ["Tarjeta crédito", "Tarjeta débito", "Efectivo",
                "Transferencia", "Buepp/QR", "Débito automático"]
@@ -88,7 +88,16 @@ with tab_registro:
     with st.form("form_gasto", clear_on_submit=True):
         c1, c2, c3 = st.columns(3)
         fecha = c1.date_input("Fecha", value=date.today(), format="DD/MM/YYYY")
-        monto = c2.number_input("Monto", min_value=0.0, step=100.0, format="%.2f")
+
+monto = c2.number_input(
+    "Monto",
+    min_value=0.0,
+    value=None,
+    step=None,
+    format="%.2f",
+    placeholder="0.00",
+)
+
         moneda = c3.selectbox("Moneda", ["ARS", "USD"])
 
         descripcion = st.text_input("Descripción")
@@ -101,9 +110,11 @@ with tab_registro:
         tarjeta = st.text_input("Tarjeta (opcional)")
         notas = st.text_area("Notas", height=68)
 
-        if st.form_submit_button("Guardar", type="primary"):
-            if monto <= 0:
-                st.error("El monto debe ser mayor a 0")
+       
+if st.form_submit_button("Guardar", type="primary"):
+    if monto is None or monto <= 0:
+        st.error("El monto debe ser mayor a 0")
+
             elif not descripcion.strip():
                 st.error("Ingresá una descripción")
             else:
@@ -170,11 +181,21 @@ with tab_datos:
         st.cache_data.clear()
         st.rerun()
 
-    df = leer_df()
-    if df.empty:
-        st.info("No hay gastos cargados aún.")
-    else:
-        st.dataframe(df.sort_values("fecha", ascending=False), use_container_width=True)
+   df = leer_df()
+if df.empty:
+    st.info("No hay gastos cargados aún.")
+else:
+    df_view = df.sort_values("fecha", ascending=False).copy()
+    # Fecha del gasto: solo fecha
+    df_view["fecha"] = df_view["fecha"].dt.strftime("%d/%m/%Y")
+    # Creado en: solo fecha (era timestamp)
+    df_view["creado_en"] = pd.to_datetime(
+        df_view["creado_en"], errors="coerce"
+    ).dt.strftime("%d/%m/%Y")
+    # Monto con formato prolijo
+    df_view["monto"] = df_view["monto"].map(lambda x: f"{x:,.2f}")
+
+    st.dataframe(df_view, use_container_width=True, hide_index=True)
         st.download_button("⬇️ Descargar CSV", df.to_csv(index=False).encode(),
                            "gastos.csv", "text/csv")
 
